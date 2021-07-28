@@ -30,7 +30,7 @@ import { FrontendApplicationStateService } from './frontend-application-state';
 import { ContextMenuRenderer, Anchor } from './context-menu-renderer';
 import { parseCssMagnitude } from './browser';
 import { WidgetManager } from './widget-manager';
-import { TabBarToolbarRegistry, TabBarToolbarFactory, TabBarToolbar } from './shell/tab-bar-toolbar';
+import { TabBarToolbarRegistry, TabBarToolbarFactory, TabBarToolbar, TabBarDelegator } from './shell/tab-bar-toolbar';
 import { Key } from './keys';
 import { ProgressBarFactory } from './progress-bar-factory';
 
@@ -53,7 +53,7 @@ export class ViewContainerIdentifier {
  * and allows to collapse / expand the widget content.
  */
 @injectable()
-export class ViewContainer extends BaseWidget implements StatefulWidget, ApplicationShell.TrackableWidgetProvider {
+export class ViewContainer extends BaseWidget implements StatefulWidget, ApplicationShell.TrackableWidgetProvider, TabBarDelegator {
 
     protected panel: SplitPanel;
 
@@ -173,14 +173,30 @@ export class ViewContainer extends BaseWidget implements StatefulWidget, Applica
 
     protected readonly toDisposeOnUpdateTitle = new DisposableCollection();
 
+    protected _tabBarDelegate: Widget = this;
+    updateTabBarDelegate(): void {
+        const visibleParts = this.getParts().filter(part => !part.isHidden);
+        if (visibleParts.length === 1) {
+            this._tabBarDelegate = visibleParts[0].wrapped;
+        } else {
+            this._tabBarDelegate = this;
+        }
+    }
+
+    getTabBarDelegate(): Widget | undefined {
+        return this._tabBarDelegate;
+    }
+
     protected updateTitle(): void {
         this.toDisposeOnUpdateTitle.dispose();
         this.toDispose.push(this.toDisposeOnUpdateTitle);
+        this.updateTabBarDelegate();
         const title = this.titleOptions;
         if (!title) {
             return;
         }
-        const visibleParts = this.getParts().filter(part => !part.isHidden);
+        const allParts = this.getParts();
+        const visibleParts = allParts.filter(part => !part.isHidden);
         this.title.label = title.label;
         if (visibleParts.length === 1) {
             const part = visibleParts[0];
@@ -191,29 +207,30 @@ export class ViewContainer extends BaseWidget implements StatefulWidget, Applica
             }
             part.collapsed = false;
             part.hideTitle();
-            this.toolbarRegistry.visibleItems(part.wrapped).forEach(partItem => {
-                const id = `__${this.id}_title:${partItem.id}`;
-                if ('command' in partItem) {
-                    const command = this.commandRegistry.getCommand(partItem.id);
-                    this.toDisposeOnUpdateTitle.push(this.commandRegistry.registerCommand({ id }, {
-                        execute: (arg, ...args) => arg instanceof Widget && arg.id === this.id && this.commandRegistry.executeCommand(partItem.command, part.wrapped, ...args),
-                        isEnabled: (arg, ...args) => arg instanceof Widget && arg.id === this.id && this.commandRegistry.isEnabled(partItem.command, part.wrapped, ...args),
-                        isVisible: (arg, ...args) => arg instanceof Widget && arg.id === this.id && this.commandRegistry.isVisible(partItem.command, part.wrapped, ...args),
-                        isToggled: (arg, ...args) => arg instanceof Widget && arg.id === this.id && this.commandRegistry.isToggled(partItem.command, part.wrapped, ...args),
-                    }));
-                    const tooltip = partItem.tooltip || (command && command.label);
-                    const icon = partItem.icon || (command && command.iconClass);
-                    this.toDisposeOnUpdateTitle.push(this.toolbarRegistry.registerItem({ ...partItem, id, command: id, tooltip, icon }));
-                } else {
-                    this.toDisposeOnUpdateTitle.push(this.toolbarRegistry.registerItem({
-                        ...partItem,
-                        id,
-                        isVisible: widget => widget.id === this.id && (!partItem.isVisible || partItem.isVisible(part.wrapped))
-                    }));
-                }
-            });
         } else {
             visibleParts.forEach(part => part.showTitle());
+        }
+        if (allParts.length > 1) {
+            for (const part of allParts) {
+                const newId = `__toggle-visibility-toolbar-item-${this.id}:${part.wrapped.id}`;
+                const existingId = this.toggleVisibilityCommandId(part);
+                const existingHandler = this.commandRegistry.getAllHandlers(existingId)[0];
+                const existingCommand = this.commandRegistry.getCommand(existingId);
+                if (existingHandler && existingCommand) {
+                    this.toDisposeOnUpdateTitle.push(this.commandRegistry.registerCommand({ ...existingCommand, id: newId }, {
+                        execute: () => existingHandler.execute(),
+                        isToggled: () => !!existingHandler.isToggled?.(),
+                        isEnabled: () => part.canHide,
+                        isVisible: widget => widget === this.getTabBarDelegate()
+                    }));
+                    this.toDisposeOnUpdateTitle.push(this.toolbarRegistry.registerItem({
+                        id: newId,
+                        command: newId,
+                        group: 'view',
+                        tooltip: part.wrapped.title.caption || part.wrapped.title.label,
+                    }));
+                }
+            }
         }
         const caption = title.caption || title.label;
         if (caption) {
@@ -891,8 +908,7 @@ export class ViewContainerPart extends BaseWidget {
         this.toolbar = toolbar;
         this.toHideToolbar.push(Disposable.create(() => this.toolbar = undefined));
 
-        const items = this.toolbarRegistry.visibleItems(this.wrapped);
-        toolbar.updateItems(items, this.wrapped);
+        this.toolbar.updateTarget(this.wrapped);
     }
 
     get toolbarHidden(): boolean {

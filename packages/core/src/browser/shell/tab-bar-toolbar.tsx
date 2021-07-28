@@ -43,6 +43,20 @@ export interface TabBarToolbarContribution {
     registerToolbarItems(registry: TabBarToolbarRegistry): void;
 }
 
+export interface TabBarDelegator extends Widget {
+    getTabBarDelegate(): Widget | undefined;
+}
+
+export namespace TabBarDelegator {
+    export const is = (candidate?: Widget): candidate is TabBarDelegator => {
+        if (candidate) {
+            const asDelegator = candidate as TabBarDelegator;
+            return typeof asDelegator.getTabBarDelegate === 'function';
+        }
+        return false;
+    };
+}
+
 /**
  * Representation of an item in the tab
  */
@@ -280,6 +294,9 @@ export class TabBarToolbar extends ReactWidget {
     @inject(ContextMenuRenderer)
     protected readonly contextMenuRenderer: ContextMenuRenderer;
 
+    @inject(TabBarToolbarRegistry)
+    protected readonly toolbarRegistry: TabBarToolbarRegistry;
+
     constructor() {
         super();
         this.addClass(TabBarToolbar.Styles.TAB_BAR_TOOLBAR);
@@ -306,6 +323,12 @@ export class TabBarToolbar extends ReactWidget {
             }
         }));
         this.update();
+    }
+
+    updateTarget(current?: Widget): void {
+        const operativeWidget = TabBarDelegator.is(current) ? current.getTabBarDelegate() : current;
+        const items = operativeWidget ? this.toolbarRegistry.visibleItems(operativeWidget) : [];
+        this.updateItems(items, operativeWidget);
     }
 
     protected readonly toDisposeOnSetCurrent = new DisposableCollection();
@@ -408,7 +431,7 @@ export class TabBarToolbar extends ReactWidget {
             // TODO order is missing, items sorting will be alphabetic
             toDisposeOnHide.push(this.menus.registerMenuAction([...menuPath, ...item.group!.split('/')], {
                 label: item.tooltip,
-                commandId: item.id,
+                commandId: item.command,
                 when: item.when
             }));
         }
